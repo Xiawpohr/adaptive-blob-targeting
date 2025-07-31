@@ -1,5 +1,7 @@
 # Maintaining Effective Blob Fee Markets During Network Scaling: Dual-Variable EIP-1559
 
+> Thanks to [Shao](https://x.com/tienshaoku), [Chih Cheng Liang](https://x.com/ChihChengLiang), [Panta Rhei](https://x.com/0xpantarhei) for feedback and discussions.
+
 ## Abstract
 
 Ethereum is entering a period of massive network capacity scaling. With the launch of PeerDAS in the Fusaka fork, blob capacity will scale up to 48/72 as planned. However, blob demand growth is not keeping pace with supply capacity, creating an oversupply situation that renders the blob fee market ineffective for extended periods.
@@ -8,21 +10,29 @@ This proposal introduces a dual-variable resource pricing mechanism as an extens
 
 ## Motivation
 
-Current resource fees on Ethereum fluctuate with network congestion, rising during congestion and falling during low usage periods. In mature markets, resource scarcity drives prices to match supply and demand. However, when we scale network capacity by adding new resources (like increasing blob limits), we create oversupply situation. Since demand doesn't immediately respond to increased supply, prices fail to signal market equilibrium and become ineffective. Taking blobs, the feature introduced last year, as an example, we can observe the following issues:
+Current resource fees on Ethereum fluctuate with network congestion, rising during congestion and falling during low usage periods. In efficient markets, resource scarcity drives prices to match supply and demand. However, when we scale network capacity by increasing resource targets and limits, the lack of scarcity causes oversupply situation. Since demand doesn't rise to the level of new target accordingly, prices no longer reflect market equilibrium and become ineffective. We’ve seen signs of this imbalance in blob usage over the past year:
 
 1. Blob usage remains below the target most of the time. In practice, demand doesn't immediately respond to supply changes. Blob demand grows gradually, and it still takes time to reach target consumption levels. Until then, `base_fee_per_blob_gas` remains almost free.
 
-![Screenshot of average blob count](./img/screenshot_average_blob_count.png)
+    ![Screenshot of average blob count](./img/screenshot_average_blob_count.png)
 
-2. `base_fee_per_blob_gas`, which is a function of `excess_blob_gas`, becomes volatile when demand just reaches the target level because insufficient `excess_blob_gas` cannot support steady fluctuations. This makes `base_fee_per_blob_gas` less predictable. Consider a simplified example: if the median `excess_blob_gas` is 200 and the fluctuation range is around ±1000, the change range would be between [0, 1200], with the value being 0 most of the time. The figure below shows the base fee fluctuations on May 5, 2025, before the Pectra fork.
+2. The `base_fee_per_blob_gas` becomes highly volatile when demand approaches the target level. Since the price starts at just 1 wei, even small fluctuations in blob gas usage can cause dramatic price swings. This volatility is pronounced particularly because the market is dominated by a few major consumers, whose high blob gas usage tends to cluster during the same periods, further amplifying price fluctuations and reducing predictability.
 
-![Screenshot of blob fee](./img/screenshot_blob_fee.png)
+    The figure below illustrates these base fee fluctuations on May 5, 2025, before the Pectra fork. The data shows three price spikes, while fees remained nearly free for most of the time period.
 
-3. Every time we scale up `target_blob_gas_per_block`, `base_fee_per_blob_gas` drops to 1 wei again. This means we face issues (1) and (2) repeatedly. When peerDAS and BRO are launched, we can expect `base_fee_per_blob_gas` to remain effectively zero for quite a long time.
+    ![Screenshot of blob fee](./img/screenshot_blob_fee.png)
+
+3. Every time we scale up `target_blob_gas_per_block`, `base_fee_per_blob_gas` drops to 1 wei again. This means we face issues (1) and (2) repeatedly. When [PeerDAS](https://eips.ethereum.org/EIPS/eip-7594) and [BRO](https://eips.ethereum.org/EIPS/eip-7892) are launched, we can expect `base_fee_per_blob_gas` to remain effectively zero for quite a long time.
 
 ## Dual-variable EIP-1559 Mechanism
 
-This mechanism balances demand and supply by dynamically adjusting both the base fee ($b_i$) and target ($t_i$) simultaneously. The mechanism achieves these purposes:
+The current blob base fee is calculated as follows:
+
+$$b_{n+1}=b_n∗exp(\frac{g_i−T}{8T})$$
+
+Where $b_n$ is the current block’s base fee, $b_{n+1}$ is the next block’s base fee, $g_i$ is current gas used, and $T$ is the target blob gas fixed at 6. See [this](https://notes.ethereum.org/@vbuterin/proto_danksharding_faq#How-does-the-exponential-EIP-1559-blob-fee-adjustment-mechanism-work) for more details.
+
+We propose making target blob gas a variable to dynamically adjust both the base fee ($b_i$) and target ($t_i$). This mechanism serves the following purposes:
 
 1. Regulates blob gas usage around the target, which represents sustained capacity that the network can handle comfortably for a long time.
 2. The base fee still serves as a reserve price based on network congestion.
@@ -40,9 +50,13 @@ $$b_n = b_0 \, \exp(K_b \sum_{i=0}^{n-1} g_i - t_i)$$
 
 Even though the target is a variable instead of a fixed number, the formula remains the same as the original one. By definition, $K_b = \frac{1}{\text{Base Fee Update Fraction}}$ and $\sum_{i=0}^{n-1} g_i - t_i = \text{Excess Blob Gas}$. Therefore, we do not need to change any existing implementation.
 
-The adjustment rate per unit of excess gas ($K_b$) provides a convenient way to consider base fee sensitivity. Instead of considering whether responsiveness to full and empty gas usage is symmetrical, we can say it has symmetrical responsiveness by adjusting the same percentage for the same amount of excess gas change, regardless of whether excess gas increases or decreases.
+### Base fee sensitivity
 
-We can still use 12.5% as the maximum rate of change for the base fee and calculate $K_b$ using the following formula:
+The adjustment rate per unit of excess blob gas ($K_b$) provides a convenient approach to consider base fee sensitivity. In [EIP-7691](https://eips.ethereum.org/EIPS/eip-7691), the new target-to-max ratio of 2:3 disrupts the symmetrical responsiveness between full and empty blob usage scenarios. This asymmetry causes `base_fee_per_blob_gas` to increase by approximately 8.2% under full blob usage while decreasing by approximately 14.5% under empty blob usage.
+
+Rather than focusing on whether responsiveness to full versus empty blob usage is symmetrical, we can redefine symmetrical responsiveness as applying the same percentage adjustment for equivalent changes in excess gas, regardless of whether excess gas increases or decreases. This approach ensures that base fee sensitivity remains consistent under dynamic target conditions.
+
+We propose to restore 12.5% as the maximum rate of change for the base fee and calculates $K_b$ using the following formula:
 
 $$\exp(K_b \times \max(abs(g_i - t_i))) \approx 1.125$$
 
@@ -80,7 +94,7 @@ The key points about this model are:
 
 The figure below demonstrates a supply curve with supply elasticity, where capacity respond dynamically to the current price rather than maintaining a fixed target.
 
-![blob_supply_curve](./img/blob_supply_curve.png)
+![blob_supply_curve](https://hackmd.io/_uploads/SkDU0i3Lge.png)
 
 ### Parameters
 
@@ -93,15 +107,11 @@ New parameters introduced in this proposal include:
 • `BASE_FEE_AT_MAX_TARGET_BLOBS`
 • `TARGET_BLOB_UPDATE_FRACTION`
 
-### Simple Analogy
-
-Think of this like a smart highway toll system. Traditional EIP-1559 only adjusts toll prices when traffic gets heavy. Our dual-variable system is smarter: it can also add or remove toll lanes based on long-term traffic patterns. When traffic consistently exceeds capacity, it gradually opens more lanes and adjusts prices. When traffic is consistently light, it can close some lanes to maintain meaningful toll prices. This keeps the system economically viable during both growth and scaling phases.
-
 ## Simulation Analysis
 
 For the following simulation analysis, these parameters are set as follows:
 
-```
+```py
 MIN_TARGET_BLOBS_PER_BLOCK = 3
 MAX_TARGET_BLOBS_PER_BLOCK = 48
 MAX_BLOBS_PER_BLOCK = 72
@@ -168,7 +178,7 @@ Based on the above results, we identify three stages in the dual-variable EIP-15
 
 **Nascent stage**: Actual demand is less than or equal to `MIN_TARGET_BLOBS_PER_BLOCK`. The market lacks effective price signals that properly match supply and demand; prices remain at minimum levels regardless of actual usage patterns. However, we can bootstrap the market easily by setting relatively low values for `MIN_TARGET_BLOBS_PER_BLOCK` and `BASE_FEE_AT_MIN_TARGET_BLOBS`.
 
-**Growing stage**: Actual demand falls between `MIN_TARGET_BLOBS_PER_BLOCK` and `MAX_TARGET_BLOBS_PER_BLOCK`. Both the target blob and the base fee are controlled by the mechanism and change steadily with actual demand. The market will not revert to its nascent stage when scaling blob supply.
+**Growing stage**: Actual demand falls between `MIN_TARGET_BLOBS_PER_BLOCK` and `MAX_TARGET_BLOBS_PER_BLOCK`. Both the target blob and the base fee are controlled by the mechanism and change steadily with actual demand. The market will not go back to its nascent stage when scaling blob supply.
 
 **Mature stage**: Actual demand exceeds `MAX_TARGET_BLOBS_PER_BLOCK`. The target blob reaches `MAX_TARGET_BLOBS_PER_BLOCK`. The base fee fluctuates based on network congestion.
 
@@ -176,7 +186,7 @@ Based on the above results, we identify three stages in the dual-variable EIP-15
 
 We collected block data from blocks 22431084 to 22481502, which represents the week after the Pectra fork, using the [Blobscan API](https://api.blobscan.com/).
 
-We can see that blob gas prices (blue line) dropped quickly to 1 wei after the Pectra fork due to oversupply. Blob gas prices have remained at 1 wei since then, as confirmed by [Dune Analytics](https://dune.com/0xRob/blobs) data.
+We can see that blob gas prices (blue line) dropped quickly to 1 wei after the Pectra fork due to below-target blob gas usage, indicating oversupply. Blob gas prices have remained at 1 wei since then, as confirmed by [Dune Analytics](https://dune.com/0xRob/blobs) data.
 
 When we simulate the dual-variable EIP-1559 mechanism using the same historical data, the results (orange line) show that it takes approximately 4 days for the blob gas price to rise to around 1.5 gwei, and the target blobs follow real-world blob demand to balance supply and demand.
 
@@ -202,10 +212,12 @@ Scaling of the block gas limit may face the same oversupply issue as blob scalin
 
 [EIP-7918](https://eipsinsight.com/eips/eip-7918) proposes linking blob base fees to actual execution gas costs to ensure that blob transactions contribute proportionally to block usage.
 
-Although dual-variable EIP-1559 does not conflict with EIP-7918, both attempt to address similar issues regarding the effectiveness of the blob fee market. From our analysis, dual-variable EIP-1559 offers a cleaner solution within the multidimensional EIP-1559 roadmap. Under EIP-7918, linking various resource fees complicates the pricing process. With multidimensional EIP-1559 implementation, resource pricing complexity will increase by several orders of magnitude, making fees harder to predict. Users may experience confusion when blob prices rise due to execution gas price increases even as blob demand decreases.
+Although dual-variable EIP-1559 does not conflict with EIP-7918, both attempt to address similar issues regarding the effectiveness of the blob fee market. In my opinion, dual-variable EIP-1559 offers a cleaner solution within the multidimensional EIP-1559 roadmap. Under EIP-7918, linking various resource fees complicates the pricing process. With the launch of multidimensional EIP-1559, resource pricing complexity will increase by several orders of magnitude, making fees harder to predict. Users may experience confusion when blob prices rise due to execution gas price increases even as blob demand decreases.
 
 ## Conclusion
 
-In the next 1-2 years, DA throughput will be scaled up to 48/72 as planned, and the maximum blob count may possibly increase to 512 blobs when 2D sampling is implemented. As we scale network capacity, we also resolve the congestion on which our pricing system is based. The fee market will be expected to become ineffective during the scaling period.
+Think of this like a smart highway toll system. Original EIP-1559 only adjusts toll prices when traffic gets heavy. Our dual-variable system is smarter: it can also add or remove toll lanes based on long-term traffic patterns. When traffic consistently exceeds capacity, it gradually opens more lanes and adjusts prices. When traffic is consistently light, it can close some lanes to maintain meaningful toll prices. This keeps the system economically viable during both growth and scaling phases.
+
+In the next 1-2 years, blob throughput will be scaled up to 48/72 as planned, and the maximum blob count may possibly increase to 512 blobs when 2D sampling is implemented. As we scale network capacity, we also resolve the congestion on which current pricing system is based. The fee market will be expected to become ineffective during the scaling period.
 
 The dual-variable EIP-1559 mechanism solves the critical problem of fee market breakdown during network scaling. By automatically adjusting both price and capacity in real time, it maintains economic incentives for validators, provides predictable costs for users, and ensures network security throughout scaling phases. Most importantly, this solution is easy to implement since it builds on existing EIP-1559 with minimal changes. The fee market can remain robust and effective whether market demand is growing rapidly or declining.
